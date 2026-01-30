@@ -1,0 +1,9 @@
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# Generated PDF (rebuild from source)
+*.pdf

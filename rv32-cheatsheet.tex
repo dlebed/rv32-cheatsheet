@@ -1,0 +1,856 @@
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=1.5cm]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{fancyvrb}
+\usepackage{titlesec}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+
+\titlespacing*{\section}{0pt}{10pt}{4pt}
+\titlespacing*{\subsection}{0pt}{8pt}{3pt}
+\titlespacing*{\subsubsection}{0pt}{6pt}{2pt}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+
+\title{\bfseries RISC-V 32-bit Architecture Cheatsheet}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+
+\begin{center}
+\textbf{Target:} RV32 I, M, C, Zce, Zbb, CMO, Smepmp
+\end{center}
+
+\hrule
+\vspace{6pt}
+
+%% ============================================================
+\section{General-Purpose Registers (x0--x31)}
+
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Reg} & \textbf{ABI Name} & \textbf{Usage} & \textbf{Saver} \\
+\midrule
+x0       & zero    & Hardwired zero               & --- \\
+x1       & ra      & Return address               & Caller \\
+x2       & sp      & Stack pointer                & Callee \\
+x3       & gp      & Global pointer               & --- \\
+x4       & tp      & Thread pointer               & --- \\
+x5       & t0      & Temp / alt link register     & Caller \\
+x6--x7   & t1--t2  & Temporaries                  & Caller \\
+x8       & s0/fp   & Saved register / frame ptr   & Callee \\
+x9       & s1      & Saved register               & Callee \\
+x10--x11 & a0--a1  & Function args / return values & Caller \\
+x12--x17 & a2--a7  & Function arguments           & Caller \\
+x18--x27 & s2--s11 & Saved registers              & Callee \\
+x28--x31 & t3--t6  & Temporaries                  & Caller \\
+\bottomrule
+\end{tabular}
+
+\textbf{Compressed register set (3-bit encoding):} x8--x15 (s0--s1, a0--a5) --- used by CIW/CL/CS/CA/CB formats.
+
+%% ============================================================
+\section{Key CSR Registers}
+
+\subsection{Machine-Mode Setup}
+
+\begin{tabular}{@{}lL{2cm}L{10cm}@{}}
+\toprule
+\textbf{Address} & \textbf{Name} & \textbf{Description} \\
+\midrule
+0x300 & mstatus    & Global interrupt enable (MIE bit[3]), prior IE (MPIE bit[7]), prior privilege (MPP bits[12:11]) \\
+0x301 & misa       & ISA extensions present (bit per letter) \\
+0x304 & mie        & Interrupt enable: MSIE[3], MTIE[7], MEIE[11] \\
+0x305 & mtvec      & Trap vector base. MODE[1:0]: 0=Direct, 1=Vectored. BASE[31:2] \\
+0x306 & mcounteren & Counter access enable for lower privilege \\
+0x310 & mstatush   & Upper 32 bits of mstatus (RV32 only). MBE bit[5] \\
+\bottomrule
+\end{tabular}
+
+\subsection{Machine-Mode Trap Handling}
+
+\begin{tabular}{@{}lL{2cm}L{10cm}@{}}
+\toprule
+\textbf{Address} & \textbf{Name} & \textbf{Description} \\
+\midrule
+0x340 & mscratch & Scratch register for trap handlers \\
+0x341 & mepc     & Exception PC (saved on trap, restored by MRET) \\
+0x342 & mcause   & Trap cause. bit[31]=interrupt flag, bits[30:0]=code \\
+0x343 & mtval    & Trap value (bad address or bad instruction bits) \\
+0x344 & mip      & Interrupt pending: MSIP[3], MTIP[7], MEIP[11] \\
+\bottomrule
+\end{tabular}
+
+\subsection{PMP Registers (base PMP)}
+
+\begin{tabular}{@{}lL{2.5cm}L{9cm}@{}}
+\toprule
+\textbf{Address} & \textbf{Name} & \textbf{Description} \\
+\midrule
+0x3A0--0x3A3 & pmpcfg0--3   & PMP config (4 entries per register, 8 bits each) \\
+0x3B0--0x3EF & pmpaddr0--63 & PMP address (encodes bits[33:2] of phys addr) \\
+\bottomrule
+\end{tabular}
+
+\textbf{pmpcfg entry format (8 bits):}
+\begin{Verbatim}[frame=single,fontsize=\small]
+  [7]   [6:5] [4:3] [2] [1] [0]
+   L    (res)   A    X   W   R
+\end{Verbatim}
+
+\begin{itemize}[nosep,leftmargin=1.5em]
+  \item \textbf{A} (address matching): 0=OFF, 1=TOR, 2=NA4, 3=NAPOT
+  \item \textbf{L} = Locked (persists until reset, enforced in M-mode too)
+  \item TOR: region = \texttt{[pmpaddr[i-1] << 2, pmpaddr[i] << 2)}
+  \item NAPOT: trailing ones in pmpaddr encode size. Size = $2^{(\text{trailing\_ones} + 3)}$ bytes
+\end{itemize}
+
+\subsection{Smepmp (ePMP) --- \texttt{mseccfg} CSR}
+
+\begin{tabular}{@{}llL{8cm}@{}}
+\toprule
+\textbf{Address} & \textbf{Name} & \textbf{Description} \\
+\midrule
+0x747 & mseccfg  & PMP security configuration \\
+0x757 & mseccfgh & Upper 32 bits (RV32 only) \\
+\bottomrule
+\end{tabular}
+
+\textbf{mseccfg fields:}
+\begin{Verbatim}[frame=single,fontsize=\small]
+  [2]   [1]    [0]
+  RLB   MMWP   MML
+\end{Verbatim}
+
+\begin{itemize}[nosep,leftmargin=1.5em]
+  \item \textbf{MML} (bit 0) --- Machine Mode Lockdown (sticky). Reinterprets L bit:
+    \begin{itemize}[nosep]
+      \item L=1 $\rightarrow$ M-mode-only rule; L=0 $\rightarrow$ S/U-mode-only rule
+      \item RW=01 becomes ``Shared Region'' encoding
+    \end{itemize}
+  \item \textbf{MMWP} (bit 1) --- Machine Mode Whitelist Policy (sticky). Default-deny for M-mode on unmatched regions
+  \item \textbf{RLB} (bit 2) --- Rule Locking Bypass. Allows editing locked PMP entries (debug/boot use). Locks to 0 once any entry has L=1
+\end{itemize}
+
+\subsection{Zcmt Extension CSR}
+
+\begin{tabular}{@{}llL{8cm}@{}}
+\toprule
+\textbf{Address} & \textbf{Name} & \textbf{Description} \\
+\midrule
+0x017 & jvt & Jump Vector Table base (used by cm.jt/cm.jalt) \\
+\bottomrule
+\end{tabular}
+
+%% ============================================================
+\section{32-bit Instruction Encoding Formats}
+
+All 32-bit instructions: bits[1:0] = \texttt{11}.
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+R-type: [31:25 funct7] [24:20 rs2] [19:15 rs1] [14:12 funct3] [11:7 rd] [6:0 opcode]
+I-type: [31:20 imm[11:0]]          [19:15 rs1] [14:12 funct3] [11:7 rd] [6:0 opcode]
+S-type: [31:25 imm[11:5]] [24:20 rs2] [19:15 rs1] [14:12 funct3] [11:7 imm[4:0]] [6:0 opcode]
+B-type: [31 imm[12]] [30:25 imm[10:5]] [24:20 rs2] [19:15 rs1] [14:12 f3]
+        [11:8 imm[4:1]] [7 imm[11]] [6:0 op]
+U-type: [31:12 imm[31:12]]                                      [11:7 rd] [6:0 opcode]
+J-type: [31 imm[20]] [30:21 imm[10:1]] [20 imm[11]] [19:12 imm[19:12]]
+        [11:7 rd] [6:0 opcode]
+\end{Verbatim}
+
+\textbf{Immediate ranges:}
+
+\begin{tabular}{@{}llL{7cm}@{}}
+\toprule
+\textbf{Format} & \textbf{Immediate bits} & \textbf{Range / Alignment} \\
+\midrule
+I-type & 12-bit signed & $-2048$ to $+2047$ \\
+S-type & 12-bit signed & $-2048$ to $+2047$ \\
+B-type & 13-bit signed & $-4096$ to $+4094$, 2-byte aligned \\
+U-type & 20-bit upper  & bits[31:12], $\pm 2^{31}$ with AUIPC \\
+J-type & 21-bit signed & $\pm$1\,MiB, 2-byte aligned \\
+\bottomrule
+\end{tabular}
+
+Sign bit is always in instruction bit 31.
+
+%% ============================================================
+\section{16-bit Compressed Instruction Formats (C / Zca)}
+
+All 16-bit instructions: bits[1:0] $\neq$ \texttt{11}.
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+CR:  [15:12 funct4]  [11:7 rd/rs1]       [6:2 rs2]        [1:0 op]
+CI:  [15:13 funct3]  [12 imm]  [11:7 rd/rs1]  [6:2 imm]   [1:0 op]
+CSS: [15:13 funct3]  [12:7 imm]           [6:2 rs2]        [1:0 op]
+CIW: [15:13 funct3]  [12:5 imm]                [4:2 rd']   [1:0 op]
+CL:  [15:13 funct3]  [12:10 imm] [9:7 rs1'] [6 imm] [5:3 rd']  [1:0 op]
+CS:  [15:13 funct3]  [12:10 imm] [9:7 rs1'] [6 imm] [5:3 rs2'] [1:0 op]
+CA:  [15:10 funct6]  [9:7 rd'/rs1']  [6:5 funct2]  [4:2 rs2']  [1:0 op]
+CB:  [15:13 funct3]  [12:10 offset] [9:7 rs1']  [6:2 offset]   [1:0 op]
+CJ:  [15:13 funct3]  [12:2 jump_target]                         [1:0 op]
+\end{Verbatim}
+
+3-bit register fields (rd\textquotesingle, rs1\textquotesingle, rs2\textquotesingle) encode \textbf{x8--x15} only.
+
+%% ============================================================
+\section{RV32I Base Integer Instructions}
+
+\subsection{Arithmetic \& Logic (R-type: opcode 0110011)}
+
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Instruction} & \textbf{funct7} & \textbf{funct3} & \textbf{Operation} \\
+\midrule
+ADD  & 0000000 & 000 & rd = rs1 + rs2 \\
+SUB  & 0100000 & 000 & rd = rs1 $-$ rs2 \\
+SLL  & 0000000 & 001 & rd = rs1 $\ll$ rs2[4:0] \\
+SLT  & 0000000 & 010 & rd = (rs1 $<$ rs2) signed \\
+SLTU & 0000000 & 011 & rd = (rs1 $<$ rs2) unsigned \\
+XOR  & 0000000 & 100 & rd = rs1 $\oplus$ rs2 \\
+SRL  & 0000000 & 101 & rd = rs1 $\gg$ rs2[4:0] (logical) \\
+SRA  & 0100000 & 101 & rd = rs1 $\gg$ rs2[4:0] (arithmetic) \\
+OR   & 0000000 & 110 & rd = rs1 $|$ rs2 \\
+AND  & 0000000 & 111 & rd = rs1 \& rs2 \\
+\bottomrule
+\end{tabular}
+
+\subsection{Immediate Arithmetic (I-type: opcode 0010011)}
+
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Instruction} & \textbf{imm[11:5]} & \textbf{funct3} & \textbf{Operation} \\
+\midrule
+ADDI  & ---     & 000 & rd = rs1 + sext(imm) \\
+SLTI  & ---     & 010 & rd = (rs1 $<$ sext(imm)) signed \\
+SLTIU & ---     & 011 & rd = (rs1 $<$ sext(imm)) unsigned \\
+XORI  & ---     & 100 & rd = rs1 $\oplus$ sext(imm) \\
+ORI   & ---     & 110 & rd = rs1 $|$ sext(imm) \\
+ANDI  & ---     & 111 & rd = rs1 \& sext(imm) \\
+SLLI  & 0000000 & 001 & rd = rs1 $\ll$ imm[4:0] \\
+SRLI  & 0000000 & 101 & rd = rs1 $\gg$ imm[4:0] (logical) \\
+SRAI  & 0100000 & 101 & rd = rs1 $\gg$ imm[4:0] (arith) \\
+\bottomrule
+\end{tabular}
+
+\subsection{Loads (I-type: opcode 0000011)}
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Instruction} & \textbf{funct3} & \textbf{Width} \\
+\midrule
+LB  & 000 & 8-bit, sign-ext \\
+LH  & 001 & 16-bit, sign-ext \\
+LW  & 010 & 32-bit \\
+LBU & 100 & 8-bit, zero-ext \\
+LHU & 101 & 16-bit, zero-ext \\
+\bottomrule
+\end{tabular}
+
+\subsection{Stores (S-type: opcode 0100011)}
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Instruction} & \textbf{funct3} & \textbf{Width} \\
+\midrule
+SB & 000 & 8-bit \\
+SH & 001 & 16-bit \\
+SW & 010 & 32-bit \\
+\bottomrule
+\end{tabular}
+
+\subsection{Branches (B-type: opcode 1100011)}
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Instruction} & \textbf{funct3} & \textbf{Condition} \\
+\midrule
+BEQ  & 000 & rs1 == rs2 \\
+BNE  & 001 & rs1 != rs2 \\
+BLT  & 100 & rs1 $<$ rs2 signed \\
+BGE  & 101 & rs1 $\geq$ rs2 signed \\
+BLTU & 110 & rs1 $<$ rs2 unsigned \\
+BGEU & 111 & rs1 $\geq$ rs2 unsigned \\
+\bottomrule
+\end{tabular}
+
+\subsection{Upper Immediate \& Jumps}
+
+\begin{tabular}{@{}lllL{7cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Type} & \textbf{Opcode} & \textbf{Operation} \\
+\midrule
+LUI   & U-type & 0110111 & rd = imm $\ll$ 12 \\
+AUIPC & U-type & 0010111 & rd = PC + (imm $\ll$ 12) \\
+JAL   & J-type & 1101111 & rd = PC+4; PC += sext(imm) \\
+JALR  & I-type & 1100111 & rd = PC+4; PC = (rs1 + sext(imm)) \& \textasciitilde{}1 \\
+\bottomrule
+\end{tabular}
+
+\subsection{System}
+
+\begin{tabular}{@{}lL{8cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+ECALL   & Environment call \\
+EBREAK  & Breakpoint \\
+MRET    & Return from M-mode trap \\
+WFI     & Wait for interrupt \\
+FENCE   & Memory ordering fence \\
+FENCE.I & Instruction fetch fence (Zifencei) \\
+\bottomrule
+\end{tabular}
+
+\subsection{CSR Instructions (I-type: opcode 1110011)}
+
+\begin{tabular}{@{}llL{7cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{funct3} & \textbf{Operation} \\
+\midrule
+CSRRW  & 001 & rd = CSR; CSR = rs1 \\
+CSRRS  & 010 & rd = CSR; CSR $|$= rs1 (set bits) \\
+CSRRC  & 011 & rd = CSR; CSR \&= \textasciitilde{}rs1 (clear bits) \\
+CSRRWI & 101 & rd = CSR; CSR = zimm[4:0] \\
+CSRRSI & 110 & rd = CSR; CSR $|$= zimm[4:0] \\
+CSRRCI & 111 & rd = CSR; CSR \&= \textasciitilde{}zimm[4:0] \\
+\bottomrule
+\end{tabular}
+
+%% ============================================================
+\section{M Extension --- Integer Multiply/Divide}
+
+R-type, opcode 0110011, funct7 = 0000001.
+
+\begin{tabular}{@{}llL{8cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{funct3} & \textbf{Operation} \\
+\midrule
+MUL    & 000 & rd = (rs1 $\times$ rs2)[31:0] \\
+MULH   & 001 & rd = (rs1 $\times$ rs2)[63:32] (signed$\times$signed) \\
+MULHSU & 010 & rd = (rs1 $\times$ rs2)[63:32] (signed$\times$unsigned) \\
+MULHU  & 011 & rd = (rs1 $\times$ rs2)[63:32] (unsigned$\times$unsigned) \\
+DIV    & 100 & rd = rs1 $\div$ rs2 (signed) \\
+DIVU   & 101 & rd = rs1 $\div$ rs2 (unsigned) \\
+REM    & 110 & rd = rs1 \% rs2 (signed) \\
+REMU   & 111 & rd = rs1 \% rs2 (unsigned) \\
+\bottomrule
+\end{tabular}
+
+%% ============================================================
+\section{C Extension --- Compressed Instructions (16-bit)}
+
+\subsection{Quadrant 0 (op = 00)}
+
+\begin{tabular}{@{}llL{8cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Format} & \textbf{Operation} \\
+\midrule
+C.ADDI4SPN & CIW & rd\textquotesingle{} = sp + nzuimm (scaled $\times$4) \\
+C.LW       & CL  & rd\textquotesingle{} = M[rs1\textquotesingle{} + uimm] (32-bit load) \\
+C.SW       & CS  & M[rs1\textquotesingle{} + uimm] = rs2\textquotesingle{} (32-bit store) \\
+\bottomrule
+\end{tabular}
+
+\subsection{Quadrant 1 (op = 01)}
+
+\begin{tabular}{@{}llL{8cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Format} & \textbf{Operation} \\
+\midrule
+C.NOP      & CI & No operation \\
+C.ADDI     & CI & rd = rd + nzsimm (6-bit signed) \\
+C.JAL      & CJ & ra = PC+2; PC += sext(imm) (RV32 only) \\
+C.LI       & CI & rd = sext(imm) \\
+C.ADDI16SP & CI & sp = sp + nzsimm (scaled $\times$16) \\
+C.LUI      & CI & rd = nzsimm $\ll$ 12 \\
+C.SRLI     & CB & rd\textquotesingle{} $\gg$= shamt (logical) \\
+C.SRAI     & CB & rd\textquotesingle{} $\gg$= shamt (arithmetic) \\
+C.ANDI     & CB & rd\textquotesingle{} \&= sext(imm) \\
+C.SUB      & CA & rd\textquotesingle{} = rd\textquotesingle{} $-$ rs2\textquotesingle{} \\
+C.XOR      & CA & rd\textquotesingle{} = rd\textquotesingle{} $\oplus$ rs2\textquotesingle{} \\
+C.OR       & CA & rd\textquotesingle{} = rd\textquotesingle{} $|$ rs2\textquotesingle{} \\
+C.AND      & CA & rd\textquotesingle{} = rd\textquotesingle{} \& rs2\textquotesingle{} \\
+C.J        & CJ & PC += sext(imm) \\
+C.BEQZ     & CB & if (rs1\textquotesingle{} == 0) PC += sext(offset) \\
+C.BNEZ     & CB & if (rs1\textquotesingle{} != 0) PC += sext(offset) \\
+\bottomrule
+\end{tabular}
+
+\subsection{Quadrant 2 (op = 10)}
+
+\begin{tabular}{@{}llL{8cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Format} & \textbf{Operation} \\
+\midrule
+C.SLLI   & CI  & rd $\ll$= shamt \\
+C.LWSP   & CI  & rd = M[sp + uimm] (32-bit, $\times$4 scaled) \\
+C.JR     & CR  & PC = rs1 \\
+C.MV     & CR  & rd = rs2 \\
+C.EBREAK & CR  & Breakpoint \\
+C.JALR   & CR  & ra = PC+2; PC = rs1 \\
+C.ADD    & CR  & rd = rd + rs2 \\
+C.SWSP   & CSS & M[sp + uimm] = rs2 (32-bit, $\times$4 scaled) \\
+\bottomrule
+\end{tabular}
+
+%% ============================================================
+\section{Zce --- Code Size Reduction (Zca + Zcb + Zcmp + Zcmt)}
+
+\subsection{Zcb --- Compact Basic Operations (16-bit, x8--x15 only)}
+
+\begin{tabular}{@{}lL{8cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+c.lbu    & rd\textquotesingle{} = zext(M8[rs1\textquotesingle{} + uimm]) \\
+c.lhu    & rd\textquotesingle{} = zext(M16[rs1\textquotesingle{} + uimm]) \\
+c.lh     & rd\textquotesingle{} = sext(M16[rs1\textquotesingle{} + uimm]) \\
+c.sb     & M8[rs1\textquotesingle{} + uimm] = rs2\textquotesingle{} \\
+c.sh     & M16[rs1\textquotesingle{} + uimm] = rs2\textquotesingle{} \\
+c.zext.b & rd\textquotesingle{} = rd\textquotesingle{}[7:0] (zero-extend byte) \\
+c.sext.b & rd\textquotesingle{} = sext(rd\textquotesingle{}[7:0]) \\
+c.zext.h & rd\textquotesingle{} = rd\textquotesingle{}[15:0] (zero-extend half) \\
+c.sext.h & rd\textquotesingle{} = sext(rd\textquotesingle{}[15:0]) \\
+c.not    & rd\textquotesingle{} = \textasciitilde{}rd\textquotesingle{} \\
+c.mul    & rd\textquotesingle{} = rd\textquotesingle{} $\times$ rs2\textquotesingle{} \\
+c.zext.w & (RV64 only) \\
+\bottomrule
+\end{tabular}
+
+\subsection{Zcmp --- Push/Pop \& Register Moves (16-bit)}
+
+\begin{tabular}{@{}lL{10cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+cm.push    & Push ra, \{s0--sN\} onto stack; sp $-$= stack\_adj \\
+cm.pop     & Pop ra, \{s0--sN\} from stack; sp $+$= stack\_adj \\
+cm.popret  & Pop + return (= cm.pop + ret) \\
+cm.popretz & Pop + a0=0 + return \\
+cm.mva01s  & a0 = ssrc1, a1 = ssrc2 (from s0--s7) \\
+cm.mvsa01  & sdst1 = a0, sdst2 = a1 (to s0--s7) \\
+\bottomrule
+\end{tabular}
+
+\texttt{reg\_list}: \{ra\}, \{ra,s0\}, \{ra,s0-s1\}, \ldots{} \{ra,s0-s11\} (12 valid lists, \{ra,s0-s10\} is excluded).\\
+\texttt{stack\_adj}: multiple of 16, encoding provides additional adjustment beyond register save area.
+
+\subsection{Zcmt --- Table Jump (16-bit)}
+
+\begin{tabular}{@{}lL{9cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+cm.jt   & PC = jvt\_table[index] (index = 0--31) \\
+cm.jalt & ra = PC+2; PC = jvt\_table[index] (index = 32--255) \\
+\bottomrule
+\end{tabular}
+
+Uses \texttt{jvt} CSR (0x017) as table base address. Table entries are 32-bit addresses.
+
+%% ============================================================
+\section{Zbb --- Basic Bit Manipulation}
+
+R-type / I-type, various funct7/funct3 encodings.
+
+\subsection{Logical with Negate}
+
+\begin{tabular}{@{}lL{6cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+ANDN & rd = rs1 \& \textasciitilde{}rs2 \\
+ORN  & rd = rs1 $|$ \textasciitilde{}rs2 \\
+XNOR & rd = \textasciitilde{}(rs1 $\oplus$ rs2) \\
+\bottomrule
+\end{tabular}
+
+\subsection{Count Leading/Trailing Zeros \& Population Count}
+
+\begin{tabular}{@{}lL{7cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+CLZ  & rd = count\_leading\_zeros(rs1) \\
+CTZ  & rd = count\_trailing\_zeros(rs1) \\
+CPOP & rd = population\_count(rs1) \\
+\bottomrule
+\end{tabular}
+
+\subsection{Min / Max}
+
+\begin{tabular}{@{}lL{6cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+MIN  & rd = min(rs1, rs2) signed \\
+MAX  & rd = max(rs1, rs2) signed \\
+MINU & rd = min(rs1, rs2) unsigned \\
+MAXU & rd = max(rs1, rs2) unsigned \\
+\bottomrule
+\end{tabular}
+
+\subsection{Sign / Zero Extension}
+
+\begin{tabular}{@{}lL{7cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+SEXT.B & rd = sign\_extend(rs1[7:0]) \\
+SEXT.H & rd = sign\_extend(rs1[15:0]) \\
+ZEXT.H & rd = zero\_extend(rs1[15:0]) \\
+\bottomrule
+\end{tabular}
+
+\small Note: SEXT.B/SEXT.H are pseudo-ops in the base ISA, but Zbb provides dedicated encodings (unary R-type with funct7 = 0110000, rs2 = 00100/00101).\normalsize
+
+\subsection{Bitwise Rotation}
+
+\begin{tabular}{@{}lL{7cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+ROL  & rd = rotate\_left(rs1, rs2[4:0]) \\
+ROR  & rd = rotate\_right(rs1, rs2[4:0]) \\
+RORI & rd = rotate\_right(rs1, shamt[4:0]) \\
+\bottomrule
+\end{tabular}
+
+\subsection{Byte-Reverse \& OR-Combine}
+
+\begin{tabular}{@{}lL{9cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+REV8  & rd = byte\_reverse(rs1) \\
+ORC.B & rd = per-byte: 0xFF if any bit set, else 0 \\
+\bottomrule
+\end{tabular}
+
+%% ============================================================
+\section{CMO --- Cache Management Operations}
+
+\subsection{Zicbom --- Cache Block Management}
+
+All use base register rs1 for address. No destination register. Encoded in MISC-MEM opcode space.
+
+\begin{tabular}{@{}lL{9cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+CBO.INVAL & Invalidate cache block containing M[rs1] \\
+CBO.CLEAN & Clean (writeback) cache block containing M[rs1] \\
+CBO.FLUSH & Clean + invalidate cache block \\
+\bottomrule
+\end{tabular}
+
+\subsection{Zicboz --- Cache Block Zero}
+
+\begin{tabular}{@{}lL{9cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+CBO.ZERO & Zero entire cache block containing M[rs1] \\
+\bottomrule
+\end{tabular}
+
+\subsection{Zicbop --- Cache Block Prefetch}
+
+Uses PREFETCH hint encoding with 12-bit signed offset (imm[11:0]) from rs1.
+
+\begin{tabular}{@{}lL{9cm}@{}}
+\toprule
+\textbf{Instruction} & \textbf{Operation} \\
+\midrule
+PREFETCH.I & Prefetch for instruction fetch \\
+PREFETCH.R & Prefetch for data read \\
+PREFETCH.W & Prefetch for data write \\
+\bottomrule
+\end{tabular}
+
+Cache block size is implementation-defined and discoverable at runtime.
+
+%% ============================================================
+\section{Smepmp (ePMP) --- Enhanced PMP Summary}
+
+\subsection{Modified pmpcfg Encoding When MML=1}
+
+\begin{tabular}{@{}ccccllL{4.5cm}@{}}
+\toprule
+\textbf{L} & \textbf{R} & \textbf{W} & \textbf{X} & \textbf{M-mode} & \textbf{S/U-mode} & \textbf{Description} \\
+\midrule
+0 & 0 & 0 & 0 & None & None & OFF \\
+0 & 0 & 0 & 1 & None & X    & S/U exec-only \\
+0 & 0 & 1 & 0 & None & RW   & S/U Shared read/write \\
+0 & 0 & 1 & 1 & None & RWX  & S/U full access \\
+0 & 1 & 0 & 0 & None & R    & S/U read-only \\
+0 & 1 & 0 & 1 & None & RX   & S/U read-exec \\
+0 & 1 & 1 & 0 & R    & R    & Shared read-only \\
+0 & 1 & 1 & 1 & RX   & RX   & Shared read-exec \\
+\midrule
+1 & 0 & 0 & 0 & None & None & M-mode locked OFF \\
+1 & 0 & 0 & 1 & X    & None & M-mode exec-only \\
+1 & 0 & 1 & 0 & RW   & None & M-mode read/write \\
+1 & 0 & 1 & 1 & RWX  & None & M-mode full access \\
+1 & 1 & 0 & 0 & R    & None & M-mode read-only \\
+1 & 1 & 0 & 1 & RX   & None & M-mode read-exec \\
+1 & 1 & 1 & 0 & R    & RW   & Shared: M=R, S/U=RW \\
+1 & 1 & 1 & 1 & R    & R    & Shared read-only (locked) \\
+\bottomrule
+\end{tabular}
+
+\subsection{Key Behavior Rules}
+
+\begin{itemize}[nosep,leftmargin=1.5em]
+  \item Without \texttt{mseccfg} writes, standard PMP behavior is preserved
+  \item MML and MMWP are \textbf{sticky} (cannot be unset until reset)
+  \item With MMWP=1: M-mode accesses to unmatched regions are \textbf{denied} (default-deny)
+  \item With MML=1: M-mode can only execute from M-mode-only or locked shared regions
+  \item RLB=1 allows editing locked entries (boot/debug only). RLB locks to 0 once any L=1 entry exists
+\end{itemize}
+
+%% ============================================================
+\section{Pseudoinstructions \& Assembly Conventions}
+
+\subsection{Pseudoinstructions --- Register Operations}
+
+\begin{tabular}{@{}L{4.5cm}L{6.5cm}L{4.5cm}@{}}
+\toprule
+\textbf{Pseudoinstruction} & \textbf{Base Expansion} & \textbf{Notes} \\
+\midrule
+NOP           & ADDI x0, x0, 0                           & No operation \\
+LI rd, imm    & ADDI rd, x0, imm                         & imm in [$-$2048, 2047] \\
+LI rd, imm    & LUI rd, \%hi(imm) + ADDI rd, rd, \%lo(imm) & Outside 12-bit range \\
+LA rd, symbol & AUIPC rd, \%pcrel\_hi(sym) + ADDI rd, rd, \%pcrel\_lo(label) & PC-relative (default) \\
+LA rd, symbol & LUI rd, \%hi(sym) + ADDI rd, rd, \%lo(sym) & Absolute (norelax) \\
+MV rd, rs     & ADDI rd, rs, 0                           & Copy register \\
+NOT rd, rs    & XORI rd, rs, $-$1                        & Bitwise complement \\
+NEG rd, rs    & SUB rd, x0, rs                           & Two's complement negate \\
+SEQZ rd, rs   & SLTIU rd, rs, 1                          & Set if == 0 \\
+SNEZ rd, rs   & SLTU rd, x0, rs                          & Set if != 0 \\
+SLTZ rd, rs   & SLT rd, rs, x0                           & Set if $<$ 0 \\
+SGTZ rd, rs   & SLT rd, x0, rs                           & Set if $>$ 0 \\
+\bottomrule
+\end{tabular}
+
+\small\textbf{Notes:} LI with bits[11:0]==0 uses only LUI. MV may compress to C.MV.\normalsize
+
+\subsection{Pseudoinstructions --- Branch Aliases}
+
+\begin{tabular}{@{}L{4.5cm}L{6cm}@{}}
+\toprule
+\textbf{Pseudoinstruction} & \textbf{Base Expansion} \\
+\midrule
+BEQZ rs, offset  & BEQ rs, x0, offset \\
+BNEZ rs, offset  & BNE rs, x0, offset \\
+BLEZ rs, offset  & BGE x0, rs, offset \\
+BGEZ rs, offset  & BGE rs, x0, offset \\
+BLTZ rs, offset  & BLT rs, x0, offset \\
+BGTZ rs, offset  & BLT x0, rs, offset \\
+BGT rs, rt, offset  & BLT rt, rs, offset \\
+BLE rs, rt, offset  & BGE rt, rs, offset \\
+BGTU rs, rt, offset & BLTU rt, rs, offset \\
+BLEU rs, rt, offset & BGEU rt, rs, offset \\
+\bottomrule
+\end{tabular}
+
+\small\textbf{Note:} Operand-swap aliases reuse existing branch opcodes by swapping rs1/rs2.\normalsize
+
+\subsection{Pseudoinstructions --- Jump \& Call}
+
+\begin{tabular}{@{}L{3.5cm}L{8cm}L{4cm}@{}}
+\toprule
+\textbf{Pseudoinstruction} & \textbf{Base Expansion} & \textbf{Notes} \\
+\midrule
+J offset     & JAL x0, offset            & Unconditional jump \\
+JR rs        & JALR x0, rs, 0            & Jump register \\
+RET          & JALR x0, ra, 0            & Return from subroutine \\
+CALL symbol  & AUIPC ra, \%pcrel\_hi(sym) + JALR ra, ra, \%pcrel\_lo(label) & Far call \\
+TAIL symbol  & AUIPC t1, \%pcrel\_hi(sym) + JALR x0, t1, \%pcrel\_lo(label) & Far tail call \\
+\bottomrule
+\end{tabular}
+
+\small\textbf{Notes:} CALL/TAIL are two-instruction sequences (AUIPC+JALR). TAIL uses t1 as scratch. Linker relaxation may reduce to single JAL.\normalsize
+
+\subsection{Pseudoinstructions --- CSR Shorthands}
+
+\begin{tabular}{@{}L{3.5cm}L{5.5cm}L{5.5cm}@{}}
+\toprule
+\textbf{Pseudoinstruction} & \textbf{Base Expansion} & \textbf{Notes} \\
+\midrule
+CSRR rd, csr   & CSRRS rd, csr, x0   & Read CSR \\
+CSRW csr, rs   & CSRRW x0, csr, rs   & Write CSR \\
+CSRS csr, rs   & CSRRS x0, csr, rs   & Set bits in CSR \\
+CSRC csr, rs   & CSRRC x0, csr, rs   & Clear bits in CSR \\
+CSRWI csr, imm & CSRRWI x0, csr, imm & Write CSR (immediate) \\
+CSRSI csr, imm & CSRRSI x0, csr, imm & Set bits (immediate) \\
+CSRCI csr, imm & CSRRCI x0, csr, imm & Clear bits (immediate) \\
+\bottomrule
+\end{tabular}
+
+\small\textbf{Note:} CSRRS/CSRRC with rs1=x0 are read-only. CSRRW/CSRRWI with rd=x0 discard old value but write still occurs.\normalsize
+
+\subsection{Relocation Operators}
+
+\begin{tabular}{@{}L{3cm}L{5.5cm}L{6cm}@{}}
+\toprule
+\textbf{Operator} & \textbf{Meaning} & \textbf{Typical Pattern} \\
+\midrule
+\%hi(sym)        & Upper 20 bits of absolute address     & LUI rd, \%hi(sym) \\
+\%lo(sym)        & Lower 12 bits of absolute address     & ADDI rd, rd, \%lo(sym) \\
+\%pcrel\_hi(sym) & Upper 20 bits of PC-relative offset   & AUIPC rd, \%pcrel\_hi(sym) \\
+\%pcrel\_lo(label) & Lower 12 bits of PC-relative offset & ADDI rd, rd, \%pcrel\_lo(label) \\
+\bottomrule
+\end{tabular}
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+# Absolute address loading
+  LUI   rd, %hi(symbol)
+  ADDI  rd, rd, %lo(symbol)
+
+# PC-relative address loading (default with relaxation)
+label:
+  AUIPC rd, %pcrel_hi(symbol)
+  ADDI  rd, rd, %pcrel_lo(label)
+\end{Verbatim}
+
+\small\textbf{Note:} \%hi adds +1 when bit[11] is set to compensate for ADDI sign-extension. \%pcrel\_lo references the AUIPC label, not the target symbol.\normalsize
+
+\subsection{Common Assembler Directives}
+
+\begin{tabular}{@{}L{5.5cm}L{10cm}@{}}
+\toprule
+\textbf{Directive} & \textbf{Description} \\
+\midrule
+.text               & Switch to text (code) section \\
+.data               & Switch to initialized data section \\
+.bss                & Switch to uninitialized data section \\
+.section \textit{name} & Switch to named section \\
+.globl \textit{sym} & Make symbol globally visible \\
+.local \textit{sym} & Mark symbol as local \\
+.align \textit{n}   & Align next datum to $2^n$ byte boundary \\
+.balign \textit{n}  & Align next datum to \textit{n} byte boundary \\
+.byte \textit{val}  & Emit 8-bit value(s) \\
+.half \textit{val}  & Emit 16-bit value(s) \\
+.word \textit{val}  & Emit 32-bit value(s) \\
+.zero \textit{n}    & Emit \textit{n} zero bytes \\
+.string \textit{str} / .asciz \textit{str} & Emit NUL-terminated string \\
+.equ \textit{sym, val} / .set \textit{sym, val} & Define symbolic constant \\
+.option rvc         & Enable compressed instruction emission \\
+.option norvc       & Disable compressed instruction emission \\
+.option relax       & Enable linker relaxation (default) \\
+.option norelax     & Disable linker relaxation \\
+.type \textit{sym}, @function/@object & Set ELF symbol type \\
+.size \textit{sym, expr} & Set ELF symbol size \\
+\bottomrule
+\end{tabular}
+
+\subsection{Calling Convention (RV32 ILP32)}
+
+\subsubsection*{Argument Passing}
+
+\begin{itemize}[nosep,leftmargin=1.5em]
+  \item \textbf{a0--a7} carry integer arguments; additional arguments spill to the stack
+  \item 64-bit arguments use aligned even--odd register pairs (e.g., a0--a1, a2--a3)
+  \item Return value in \textbf{a0} (or a0--a1 for 64-bit)
+  \item Large structs returned via hidden pointer in \textbf{a0}
+  \item \textbf{sp} must be 16-byte aligned at call boundaries
+\end{itemize}
+
+\subsubsection*{Prologue / Epilogue Templates}
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+# Leaf function (no calls, no saved regs)
+leaf:
+    # ... body (use a0-a7, t0-t6 freely) ...
+    ret
+
+# Non-leaf function
+non_leaf:
+    addi  sp, sp, -FRAME       # allocate stack frame
+    sw    ra, FRAME-4(sp)      # save return address
+    sw    s0, FRAME-8(sp)      # save callee-saved regs
+    sw    s1, FRAME-12(sp)
+    # ... body ...
+    lw    s1, FRAME-12(sp)     # restore callee-saved regs
+    lw    s0, FRAME-8(sp)
+    lw    ra, FRAME-4(sp)      # restore return address
+    addi  sp, sp, FRAME        # deallocate stack frame
+    ret
+\end{Verbatim}
+
+\subsubsection*{Stack Frame Layout}
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+    +----------------------+  <-- Higher addresses
+    |  Caller's frame      |
+    +----------------------+
+    |  Saved ra            |
+    |  Saved s0-sN         |
+    +----------------------+
+    |  Local variables     |
+    +----------------------+
+    |  Outgoing args       |
+    +----------------------+  <-- sp (16-byte aligned)
+\end{Verbatim}
+
+\subsubsection*{Register Convention Summary}
+
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Registers} & \textbf{ABI Names} & \textbf{Role} & \textbf{Saver} \\
+\midrule
+x10--x17         & a0--a7   & Arguments / return values & Caller \\
+x5--x7, x28--x31 & t0--t6  & Temporaries              & Caller \\
+x8--x9, x18--x27 & s0--s11 & Saved registers          & Callee \\
+x1               & ra       & Return address           & Caller \\
+x2               & sp       & Stack pointer            & Callee \\
+x3               & gp       & Global pointer           & --- (not allocatable) \\
+x4               & tp       & Thread pointer           & --- (not allocatable) \\
+\bottomrule
+\end{tabular}
+
+%% ============================================================
+\section*{Quick Reference: Encoding Summary}
+
+\begin{tabular}{@{}llL{7.5cm}@{}}
+\toprule
+\textbf{Extension} & \textbf{Instr.\ Width} & \textbf{Key Opcodes / Space} \\
+\midrule
+RV32I   & 32-bit          & bits[1:0]=11, standard opcodes \\
+M       & 32-bit          & opcode=0110011, funct7=0000001 \\
+C (Zca) & 16-bit          & bits[1:0]$\neq$11, quadrants 00/01/10 \\
+Zcb     & 16-bit          & Reuses CA/CL/CS format slots \\
+Zcmp    & 16-bit          & Reuses c.fsdsp encoding space \\
+Zcmt    & 16-bit          & Reuses c.fsdsp encoding space \\
+Zbb     & 32-bit          & Various funct7 under OP/OP-IMM \\
+Zicbom  & 32-bit          & MISC-MEM opcode (0001111) \\
+Zicboz  & 32-bit          & MISC-MEM opcode (0001111) \\
+Zicbop  & 32-bit          & ORI opcode space (prefetch hints) \\
+Smepmp  & --- (CSR-only)  & mseccfg @ 0x747, mseccfgh @ 0x757 \\
+\bottomrule
+\end{tabular}
+
+\end{document}
