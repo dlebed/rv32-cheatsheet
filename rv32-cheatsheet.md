@@ -49,6 +49,38 @@ Target: RV32 I, M, C, Zce, Zbb, CMO, Smepmp
 | 0x343   | mtval    | Trap value (bad address or bad instruction bits)     |
 | 0x344   | mip      | Interrupt pending: MSIP[3], MTIP[7], MEIP[11]        |
 
+### Machine Counters & Counter Control
+
+| Address | Name | Description |
+|---------|------|-------------|
+| 0xB00 | mcycle | Cycle counter (lower 32 bits) |
+| 0xB80 | mcycleh | Cycle counter (upper 32 bits, RV32 only) |
+| 0xB02 | minstret | Instructions-retired counter (lower 32 bits) |
+| 0xB82 | minstreth | Instructions-retired counter (upper 32 bits, RV32 only) |
+| 0x320 | mcountinhibit | Counter inhibit: CY[0] stops mcycle, IR[2] stops minstret |
+
+**mcountinhibit bit fields:**
+```
+  [31:3]   [2]  [1]   [0]
+  HPMn     IR   (res)  CY
+```
+
+**Notes:**
+- Read-only shadows at 0xC00/0xC80 (cycle/cycleh) and 0xC02/0xC82 (instret/instreth) for U-mode (gated by mcounteren)
+- RV32 atomic 64-bit read pattern: read upper, read lower, re-read upper; retry if upper changed
+- mcountinhibit defaults are implementation-defined; set bits to 0 at boot to start counting
+
+**RV32 64-bit counter read pattern:**
+```
+read_mcycle64:
+    csrr  a1, mcycleh       # read upper
+    csrr  a0, mcycle        # read lower
+    csrr  t0, mcycleh       # re-read upper
+    bne   a1, t0, read_mcycle64  # retry if rolled over
+    # result in a1:a0
+    ret
+```
+
 ### PMP Registers (base PMP)
 
 | Address     | Name        | Description                                    |
@@ -769,6 +801,29 @@ isr_entry:
 - `mscratch` technique: at boot, store ISR stack pointer in `mscratch`. The double-swap restores the original `sp` on exit.
 - For nested interrupts: save `mepc`/`mcause`, re-enable `mstatus.MIE`, then call handler.
 - Zcmp `cm.push`/`cm.popret` can replace manual save/restore of `ra, s0–sN` in the C handler itself.
+
+### 13.10 Exception Return Address Adjustment
+
+| Trap Type | mepc points to | Handler must adjust? | Typical action |
+|-----------|---------------|---------------------|----------------|
+| Interrupt | Next instruction | No | Return directly via MRET |
+| Most exceptions | Faulting instruction | No (retry) | Fix cause, MRET retries the instruction |
+| ECALL | ECALL instruction | Yes (+4) | `mepc += 4` before MRET to skip ECALL |
+| EBREAK | EBREAK instruction | Depends | Debugger may +2/+4 depending on C ext; normal handler usually retries |
+
+**Notes:**
+- ECALL is the most common case requiring adjustment. Without `mepc += 4`, MRET re-executes the ECALL, creating an infinite loop.
+- EBREAK adjustment is +2 for compressed (C.EBREAK) or +4 for 32-bit EBREAK. Debuggers typically handle this; bare-metal handlers that want to skip must check instruction length.
+- Instruction length detection: if `mepc` points to a 16-bit instruction (bits[1:0] != 11), increment by 2; otherwise increment by 4.
+- Page faults / access faults: handler fixes the page table or mapping, then MRET retries the faulting load/store — no adjustment needed.
+
+**ECALL handler adjustment:**
+```
+    csrr  t0, mepc
+    addi  t0, t0, 4        # skip past ECALL
+    csrw  mepc, t0
+    mret
+```
 
 ---
 
