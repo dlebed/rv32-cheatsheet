@@ -13,6 +13,7 @@
 \usepackage{amsmath}
 \usepackage{hyperref}
 \usepackage{xcolor}
+\usepackage{needspace}
 
 \hypersetup{
   colorlinks=true,
@@ -29,6 +30,20 @@
 
 \newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 \newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+
+\raggedbottom
+
+% Prevent section/subsection headings from being orphaned at page bottom
+\let\origsection\section
+\makeatletter
+\renewcommand{\section}{\@ifstar{\@needspacesectionstar}{\@needspacesection}}
+\newcommand{\@needspacesection}[1]{\needspace{8\baselineskip}\origsection{#1}}
+\newcommand{\@needspacesectionstar}[1]{\needspace{8\baselineskip}\origsection*{#1}}
+\makeatother
+\let\origsubsection\subsection
+\renewcommand{\subsection}[1]{\needspace{6\baselineskip}\origsubsection{#1}}
+\let\origsubsubsection\subsubsection
+\renewcommand{\subsubsection}[1]{\needspace{5\baselineskip}\origsubsubsection{#1}}
 
 \title{\bfseries RISC-V 32-bit Architecture Cheatsheet}
 \author{}
