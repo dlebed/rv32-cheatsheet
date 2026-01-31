@@ -833,6 +833,193 @@ x4               & tp       & Thread pointer           & --- (not allocatable) \
 \end{tabular}
 
 %% ============================================================
+\section{Interrupt Handling \& CPU Behavior}
+
+\subsection{Interrupt vs Exception Overview}
+
+\begin{itemize}[nosep,leftmargin=1.5em]
+  \item \textbf{Interrupt} (asynchronous): caused by external or timer event. \texttt{mcause[31]=1}. \texttt{mepc} = address of \emph{next} instruction to execute.
+  \item \textbf{Exception} (synchronous): caused by executing an instruction. \texttt{mcause[31]=0}. \texttt{mepc} = address of the \emph{faulting} instruction.
+  \item Interrupts are taken only between instructions when \texttt{mstatus.MIE=1}.
+  \item \textbf{WFI} halts the hart until an interrupt is pending. May resume even if \texttt{mstatus.MIE=0} (implementation-defined).
+\end{itemize}
+
+\subsection{mstatus Interrupt-Related Fields}
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+  [31:13] [12:11] [10:8] [7]   [6:4] [3]   [2:0]
+  (other)  MPP    (res)  MPIE  (res)  MIE   (res)
+\end{Verbatim}
+
+\begin{tabular}{@{}llL{10cm}@{}}
+\toprule
+\textbf{Field} & \textbf{Bits} & \textbf{Description} \\
+\midrule
+MIE  & [3]      & Machine Interrupt Enable. 1 = interrupts enabled. \\
+MPIE & [7]      & Previous MIE value (saved on trap entry, restored by MRET). \\
+MPP  & [12:11]  & Previous privilege mode (saved on trap entry). On M-only systems, hardwired to \texttt{2'b11}. \\
+\bottomrule
+\end{tabular}
+
+\small\textbf{Notes:} MPIE/MPP form a one-level stack. On trap entry, MIE is pushed to MPIE and MIE is cleared. MRET reverses this.\normalsize
+
+\subsection{mtvec Modes}
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+  [31:2]  [1:0]
+   BASE    MODE
+\end{Verbatim}
+
+\begin{tabular}{@{}llL{10cm}@{}}
+\toprule
+\textbf{MODE} & \textbf{Value} & \textbf{Behavior} \\
+\midrule
+Direct   & 0 & All traps jump to \texttt{BASE}. \\
+Vectored & 1 & Exceptions jump to \texttt{BASE}. Interrupts jump to \texttt{BASE + 4 * cause\_code}. \\
+\bottomrule
+\end{tabular}
+
+\small\textbf{Notes:} BASE must be 4-byte aligned (MODE=0) or aligned to the table size (MODE=1). In vectored mode, exceptions always go to \texttt{BASE}.\normalsize
+
+\subsection{mcause Values}
+
+\textbf{Interrupts} (mcause[31] = 1):
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Code} & \textbf{Name} & \textbf{Source} \\
+\midrule
+3    & Machine Software Interrupt (MSI) & CLINT MSIP register \\
+7    & Machine Timer Interrupt (MTI)    & CLINT mtime $\geq$ mtimecmp \\
+11   & Machine External Interrupt (MEI) & PLIC \\
+$\geq$16 & Platform-defined             & Implementation-specific \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}
+\textbf{Exceptions} (mcause[31] = 0):
+
+\begin{tabular}{@{}lL{5cm}L{4.5cm}@{}}
+\toprule
+\textbf{Code} & \textbf{Name} & \textbf{mtval content} \\
+\midrule
+0  & Instruction address misaligned & Faulting address \\
+1  & Instruction access fault       & Faulting address \\
+2  & Illegal instruction            & Faulting instruction bits \\
+3  & Breakpoint (EBREAK)            & Faulting PC \\
+4  & Load address misaligned        & Faulting address \\
+5  & Load access fault              & Faulting address \\
+6  & Store/AMO address misaligned   & Faulting address \\
+7  & Store/AMO access fault         & Faulting address \\
+8  & Environment call from U-mode   & 0 \\
+11 & Environment call from M-mode   & 0 \\
+12 & Instruction page fault         & Faulting address \\
+13 & Load page fault                & Faulting address \\
+15 & Store/AMO page fault           & Faulting address \\
+\bottomrule
+\end{tabular}
+
+\small\textbf{Notes:} On M-only systems, codes 8--10 and 12--15 may not be generated. \texttt{mtval} may be zero if not supported.\normalsize
+
+\subsection{mie / mip Bit Layout}
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+  [31:12]     [11]      [10:8] [7]      [6:4] [3]      [2:0]
+  (platform)  MEIE/MEIP (res)  MTIE/MTIP (res) MSIE/MSIP (res)
+\end{Verbatim}
+
+\begin{tabular}{@{}lllL{6cm}@{}}
+\toprule
+\textbf{Bit} & \textbf{mie name} & \textbf{mip name} & \textbf{Source} \\
+\midrule
+3  & MSIE & MSIP & CLINT software interrupt register \\
+7  & MTIE & MTIP & CLINT timer (mtime $\geq$ mtimecmp) \\
+11 & MEIE & MEIP & PLIC external interrupt \\
+\bottomrule
+\end{tabular}
+
+\textbf{Interrupt-taken condition:} \texttt{mstatus.MIE=1 AND mie[N]=1 AND mip[N]=1}
+
+\subsection{CPU Behavior on Trap Entry}
+
+Hardware-atomic sequence when a trap is taken:
+
+\begin{enumerate}[nosep,leftmargin=1.5em]
+  \item \texttt{mepc} $\leftarrow$ PC (faulting instruction for exceptions, next instruction for interrupts)
+  \item \texttt{mcause} $\leftarrow$ cause code (with bit[31] set for interrupts)
+  \item \texttt{mtval} $\leftarrow$ trap value (bad address, bad instruction bits, or 0)
+  \item \texttt{mstatus.MPIE} $\leftarrow$ \texttt{mstatus.MIE}
+  \item \texttt{mstatus.MIE} $\leftarrow$ 0 (interrupts disabled)
+  \item \texttt{mstatus.MPP} $\leftarrow$ current privilege mode
+  \item PC $\leftarrow$ \texttt{mtvec} target (BASE for direct mode; BASE + 4*cause for vectored interrupts)
+\end{enumerate}
+
+\subsection{CPU Behavior on MRET}
+
+\begin{enumerate}[nosep,leftmargin=1.5em]
+  \item PC $\leftarrow$ \texttt{mepc}
+  \item \texttt{mstatus.MIE} $\leftarrow$ \texttt{mstatus.MPIE}
+  \item \texttt{mstatus.MPIE} $\leftarrow$ 1
+  \item Privilege mode $\leftarrow$ \texttt{mstatus.MPP}
+  \item \texttt{mstatus.MPP} $\leftarrow$ least-privileged supported mode (M on M-only systems)
+\end{enumerate}
+
+\subsection{Interrupt Priority}
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Priority} & \textbf{Interrupt} & \textbf{mcause code} \\
+\midrule
+Highest & Machine External (MEI) & 11 \\
+        & Machine Software (MSI) & 3  \\
+Lowest  & Machine Timer (MTI)    & 7  \\
+\bottomrule
+\end{tabular}
+
+\small\textbf{Notes:} Default spec priority when multiple interrupts are pending simultaneously. Synchronous exceptions take precedence over asynchronous interrupts. PLIC provides sub-priority among external interrupt sources.\normalsize
+
+\subsection{Typical ISR Prologue/Epilogue}
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+isr_entry:
+    csrrw sp, mscratch, sp     # swap sp <-> mscratch (ISR stack)
+    addi  sp, sp, -64          # allocate frame
+    sw    ra,  60(sp)
+    sw    t0,  56(sp)
+    sw    t1,  52(sp)
+    sw    t2,  48(sp)
+    sw    a0,  44(sp)
+    sw    a1,  40(sp)
+    # ... remaining caller-saved: a2-a7, t3-t6 ...
+
+    csrr  a0, mcause           # read trap cause
+    csrr  a1, mepc             # read exception PC
+    sw    a1, 0(sp)            # save mepc (needed if nested)
+
+    call  trap_dispatch        # C handler: trap_dispatch(mcause, mepc)
+
+    lw    a1, 0(sp)            # restore mepc
+    csrw  mepc, a1
+    # ... restore a2-a7, t3-t6 ...
+    lw    a1,  40(sp)
+    lw    a0,  44(sp)
+    lw    t2,  48(sp)
+    lw    t1,  52(sp)
+    lw    t0,  56(sp)
+    lw    ra,  60(sp)
+    addi  sp, sp, 64           # deallocate frame
+    csrrw sp, mscratch, sp     # restore original sp
+    mret
+\end{Verbatim}
+
+\begin{itemize}[nosep,leftmargin=1.5em]
+  \item Only caller-saved registers need saving if the ISR calls C functions.
+  \item \texttt{mscratch} technique: at boot, store ISR stack pointer in \texttt{mscratch}. The double-swap restores the original \texttt{sp} on exit.
+  \item For nested interrupts: save \texttt{mepc}/\texttt{mcause}, re-enable \texttt{mstatus.MIE}, then call handler.
+  \item Zcmp \texttt{cm.push}/\texttt{cm.popret} can replace manual save/restore of ra, s0--sN in the C handler itself.
+\end{itemize}
+
+%% ============================================================
 \section*{Quick Reference: Encoding Summary}
 
 \begin{tabular}{@{}llL{7.5cm}@{}}

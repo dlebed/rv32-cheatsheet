@@ -613,6 +613,165 @@ non_leaf:
 
 ---
 
+## 13. Interrupt Handling & CPU Behavior
+
+### 13.1 Interrupt vs Exception Overview
+
+- **Interrupt** (asynchronous): caused by external or timer event. `mcause[31]=1`. `mepc` = address of *next* instruction to execute.
+- **Exception** (synchronous): caused by executing an instruction. `mcause[31]=0`. `mepc` = address of the *faulting* instruction.
+- Interrupts are taken only between instructions when `mstatus.MIE=1`.
+- **WFI** halts the hart until an interrupt is pending. May resume even if `mstatus.MIE=0` (implementation-defined).
+
+### 13.2 mstatus Interrupt-Related Fields
+
+```
+  [31:13] [12:11] [10:8] [7]   [6:4] [3]   [2:0]
+  (other)  MPP    (res)  MPIE  (res)  MIE   (res)
+```
+
+| Field | Bits | Description |
+|-------|------|-------------|
+| MIE   | [3]  | Machine Interrupt Enable. 1 = interrupts enabled. |
+| MPIE  | [7]  | Previous MIE value (saved on trap entry, restored by MRET). |
+| MPP   | [12:11] | Previous privilege mode (saved on trap entry). On M-only systems, hardwired to `2'b11`. |
+
+**Notes:** MPIE/MPP form a one-level stack. On trap entry, MIE is pushed to MPIE and MIE is cleared. MRET reverses this.
+
+### 13.3 mtvec Modes
+
+```
+  [31:2]  [1:0]
+   BASE    MODE
+```
+
+| MODE | Value | Behavior |
+|------|-------|----------|
+| Direct   | 0 | All traps jump to `BASE`. |
+| Vectored | 1 | Exceptions jump to `BASE`. Interrupts jump to `BASE + 4 * cause_code`. |
+
+**Notes:** BASE must be 4-byte aligned (MODE=0) or aligned to the table size (MODE=1). In vectored mode, exceptions always go to `BASE`.
+
+### 13.4 mcause Values
+
+**Interrupts** (mcause[31] = 1):
+
+| Code | Name | Source |
+|------|------|--------|
+| 3    | Machine Software Interrupt (MSI) | CLINT MSIP register |
+| 7    | Machine Timer Interrupt (MTI) | CLINT mtime >= mtimecmp |
+| 11   | Machine External Interrupt (MEI) | PLIC |
+| >=16 | Platform-defined | Implementation-specific |
+
+**Exceptions** (mcause[31] = 0):
+
+| Code | Name | mtval content |
+|------|------|---------------|
+| 0  | Instruction address misaligned | Faulting address |
+| 1  | Instruction access fault | Faulting address |
+| 2  | Illegal instruction | Faulting instruction bits |
+| 3  | Breakpoint (EBREAK) | Faulting PC |
+| 4  | Load address misaligned | Faulting address |
+| 5  | Load access fault | Faulting address |
+| 6  | Store/AMO address misaligned | Faulting address |
+| 7  | Store/AMO access fault | Faulting address |
+| 8  | Environment call from U-mode | 0 |
+| 9  | (Reserved) | — |
+| 10 | (Reserved) | — |
+| 11 | Environment call from M-mode | 0 |
+| 12 | Instruction page fault | Faulting address |
+| 13 | Load page fault | Faulting address |
+| 14 | (Reserved) | — |
+| 15 | Store/AMO page fault | Faulting address |
+
+**Notes:** On M-only systems, codes 8–10 and 12–15 may not be generated. `mtval` may be zero if not supported.
+
+### 13.5 mie / mip Bit Layout
+
+```
+  [31:12]     [11]      [10:8] [7]      [6:4] [3]      [2:0]
+  (platform)  MEIE/MEIP (res)  MTIE/MTIP (res) MSIE/MSIP (res)
+```
+
+| Bit | mie name | mip name | Source |
+|-----|----------|----------|--------|
+| 3   | MSIE     | MSIP     | CLINT software interrupt register |
+| 7   | MTIE     | MTIP     | CLINT timer (mtime >= mtimecmp) |
+| 11  | MEIE     | MEIP     | PLIC external interrupt |
+
+**Interrupt-taken condition:** `mstatus.MIE=1 AND mie[N]=1 AND mip[N]=1`
+
+### 13.6 CPU Behavior on Trap Entry
+
+Hardware-atomic sequence when a trap is taken:
+
+1. `mepc` <- PC (faulting instruction for exceptions, next instruction for interrupts)
+2. `mcause` <- cause code (with bit[31] set for interrupts)
+3. `mtval` <- trap value (bad address, bad instruction bits, or 0)
+4. `mstatus.MPIE` <- `mstatus.MIE`
+5. `mstatus.MIE` <- 0 (interrupts disabled)
+6. `mstatus.MPP` <- current privilege mode
+7. PC <- `mtvec` target (BASE for direct mode; BASE + 4*cause for vectored interrupts)
+
+### 13.7 CPU Behavior on MRET
+
+1. PC <- `mepc`
+2. `mstatus.MIE` <- `mstatus.MPIE`
+3. `mstatus.MPIE` <- 1
+4. Privilege mode <- `mstatus.MPP`
+5. `mstatus.MPP` <- least-privileged supported mode (M on M-only systems)
+
+### 13.8 Interrupt Priority
+
+| Priority | Interrupt | mcause code |
+|----------|-----------|-------------|
+| Highest  | Machine External (MEI) | 11 |
+|          | Machine Software (MSI) | 3  |
+| Lowest   | Machine Timer (MTI)    | 7  |
+
+**Notes:** This is the default spec priority when multiple interrupts are pending simultaneously. Synchronous exceptions take precedence over asynchronous interrupts. PLIC provides sub-priority among external interrupt sources.
+
+### 13.9 Typical ISR Prologue/Epilogue
+
+```
+isr_entry:
+    csrrw sp, mscratch, sp     # swap sp <-> mscratch (switch to ISR stack)
+    addi  sp, sp, -64          # allocate frame (adjust size as needed)
+    sw    ra,  60(sp)
+    sw    t0,  56(sp)
+    sw    t1,  52(sp)
+    sw    t2,  48(sp)
+    sw    a0,  44(sp)
+    sw    a1,  40(sp)
+    # ... remaining caller-saved: a2-a7, t3-t6 ...
+
+    csrr  a0, mcause           # read trap cause
+    csrr  a1, mepc             # read exception PC
+    sw    a1, 0(sp)            # save mepc (needed if nested)
+
+    call  trap_dispatch         # C handler: trap_dispatch(mcause, mepc)
+
+    lw    a1, 0(sp)            # restore mepc
+    csrw  mepc, a1
+    # ... restore a2-a7, t3-t6 ...
+    lw    a1,  40(sp)
+    lw    a0,  44(sp)
+    lw    t2,  48(sp)
+    lw    t1,  52(sp)
+    lw    t0,  56(sp)
+    lw    ra,  60(sp)
+    addi  sp, sp, 64           # deallocate frame
+    csrrw sp, mscratch, sp     # restore original sp
+    mret
+```
+
+**Notes:**
+- Only caller-saved registers need saving if the ISR calls C functions.
+- `mscratch` technique: at boot, store ISR stack pointer in `mscratch`. The double-swap restores the original `sp` on exit.
+- For nested interrupts: save `mepc`/`mcause`, re-enable `mstatus.MIE`, then call handler.
+- Zcmp `cm.push`/`cm.popret` can replace manual save/restore of `ra, s0–sN` in the C handler itself.
+
+---
+
 ## Quick Reference: Encoding Summary
 
 | Extension | Instruction Width | Key Opcodes / Space                    |
