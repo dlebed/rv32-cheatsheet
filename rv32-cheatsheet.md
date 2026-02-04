@@ -39,6 +39,39 @@ Target: RV32 I, M, C, Zce, Zbb, CMO, Smepmp
 | 0x306   | mcounteren | Counter access enable for lower privilege            |
 | 0x310   | mstatush   | Upper 32 bits of mstatus (RV32 only). MBE bit[5]   |
 
+**mstatus bit layout (RV32):**
+```
+  Bit:  [31] [30:23] [22] [21] [20] [19] [18] [17]  [16:15] [14:13] [12:11] [10:9]  [8] [7]  [6] [5]  [4]    [3] [2]    [1] [0]
+         SD  (WPRI)  TSR   TW  TVM  MXR  SUM  MPRV    XS      FS      MPP   (WPRI) SPP MPIE UBE SPIE (WPRI) MIE (WPRI) SIE (WPRI)
+```
+
+| Bit(s)  | Field | Description |
+|---------|-------|-------------|
+| [3]     | MIE   | Machine Interrupt Enable. 1 = M-mode interrupts enabled. |
+| [7]     | MPIE  | Previous MIE value, saved on trap entry. |
+| [12:11] | MPP   | Previous privilege mode (00=U, 01=S, 11=M). On M-only systems, hardwired to `11`. |
+| [17]    | MPRV  | Modify PRiVilege. When set, loads/stores use privilege in MPP. |
+| [19]    | MXR   | Make eXecutable Readable. Allows loads from execute-only pages. |
+| [22]    | TW    | Timeout Wait. WFI traps to M-mode if executed in lower privilege (after optional timeout). |
+| [14:13] | FS    | Floating-point unit status (00=Off, 01=Initial, 10=Clean, 11=Dirty). |
+| [31]    | SD    | State Dirty summary. Read-only 1 if FS or XS is Dirty. |
+
+On M-only systems, fields SIE, SPIE, SPP, SUM, TVM, TSR, and MXR are hardwired to 0. See §13.2 for interrupt behavior details.
+
+**mie bit layout (RV32):**
+```
+  Bit:  [31:16]    [15:12] [11] [10]    [9]  [8]    [7]  [6]    [5]  [4]    [3]  [2]    [1]  [0]
+        (platform) (WPRI)  MEIE (WPRI) SEIE (WPRI) MTIE (WPRI) STIE (WPRI) MSIE (WPRI) SSIE (WPRI)
+```
+
+| Bit  | Field | Description |
+|------|-------|-------------|
+| [3]  | MSIE  | Machine Software Interrupt Enable (CLINT MSIP). |
+| [7]  | MTIE  | Machine Timer Interrupt Enable (CLINT mtime >= mtimecmp). |
+| [11] | MEIE  | Machine External Interrupt Enable (PLIC). |
+
+On M-only systems, S-mode bits (SSIE[1], STIE[5], SEIE[9]) are hardwired to 0. See §13.5 for full mie/mip details.
+
 ### Machine-Mode Trap Handling
 
 | Address | Name     | Description                                          |
@@ -129,12 +162,15 @@ read_mcycle64:
 All 32-bit instructions: bits[1:0] = `11`.
 
 ```
-R-type:  [31:25 funct7] [24:20 rs2] [19:15 rs1] [14:12 funct3] [11:7 rd] [6:0 opcode]
-I-type:  [31:20 imm[11:0]]          [19:15 rs1] [14:12 funct3] [11:7 rd] [6:0 opcode]
-S-type:  [31:25 imm[11:5]] [24:20 rs2] [19:15 rs1] [14:12 funct3] [11:7 imm[4:0]] [6:0 opcode]
-B-type:  [31 imm[12]] [30:25 imm[10:5]] [24:20 rs2] [19:15 rs1] [14:12 f3] [11:8 imm[4:1]] [7 imm[11]] [6:0 op]
-U-type:  [31:12 imm[31:12]]                                      [11:7 rd] [6:0 opcode]
-J-type:  [31 imm[20]] [30:21 imm[10:1]] [20 imm[11]] [19:12 imm[19:12]]   [11:7 rd] [6:0 opcode]
+         31         25 24    20 19    15 14   12 11        7 6       0
+        +-------------+--------+--------+-------+-----------+---------+
+R-type: |   funct7    |  rs2   |  rs1   |funct3 |     rd    | opcode  |
+I-type: |      imm[11:0]       |  rs1   |funct3 |     rd    | opcode  |
+S-type: |  imm[11:5]  |  rs2   |  rs1   |funct3 |  imm[4:0] | opcode  |
+B-type: |imm[12|10:5] |  rs2   |  rs1   |funct3 |imm[4:1|11]| opcode  |
+U-type: |          imm[31:12]                    |     rd    | opcode  |
+J-type: |imm[20|10:1|11|19:12]                   |     rd    | opcode  |
+        +-------------+--------+--------+-------+-----------+---------+
 ```
 
 **Immediate ranges:**
@@ -155,15 +191,18 @@ Sign bit is always in instruction bit 31.
 All 16-bit instructions: bits[1:0] ≠ `11`.
 
 ```
-CR:  [15:12 funct4]  [11:7 rd/rs1]       [6:2 rs2]        [1:0 op]
-CI:  [15:13 funct3]  [12 imm]  [11:7 rd/rs1]  [6:2 imm]   [1:0 op]
-CSS: [15:13 funct3]  [12:7 imm]           [6:2 rs2]        [1:0 op]
-CIW: [15:13 funct3]  [12:5 imm]                [4:2 rd']   [1:0 op]
-CL:  [15:13 funct3]  [12:10 imm] [9:7 rs1']  [6 imm] [5:3 rd']  [1:0 op]
-CS:  [15:13 funct3]  [12:10 imm] [9:7 rs1']  [6 imm] [5:3 rs2'] [1:0 op]
-CA:  [15:10 funct6]  [9:7 rd'/rs1']  [6:5 funct2]  [4:2 rs2']   [1:0 op]
-CB:  [15:13 funct3]  [12:10 offset] [9:7 rs1']  [6:2 offset]    [1:0 op]
-CJ:  [15:13 funct3]  [12:2 jump_target]                          [1:0 op]
+     15    13 12   10 9     7 6   5 4    2 1  0
+     +-------+------+-------+-----+------+----+
+CL:  |funct3 | imm  | rs1'  | imm | rd'  | op |
+CS:  |funct3 | imm  | rs1'  | imm | rs2' | op |
+CB:  |funct3 |offset| rs1'  |   offset   | op |
+CA:  |   funct6     |rd'/rs1'| f2 | rs2' | op |
+CR:  |   funct4     |  rd/rs1     | rs2  | op |
+CI:  |funct3 |i| rd/rs1    |     imm     | op |
+CSS: |funct3 |    imm      |     rs2     | op |
+CIW: |funct3 |       imm          | rd'  | op |
+CJ:  |funct3 |     jump_target           | op |
+     +-------+------+-------+-----+------+----+
 ```
 
 3-bit register fields (rd', rs1', rs2') encode **x8–x15** only.
@@ -657,8 +696,8 @@ non_leaf:
 ### 13.2 mstatus Interrupt-Related Fields
 
 ```
-  [31:13] [12:11] [10:8] [7]   [6:4] [3]   [2:0]
-  (other)  MPP    (res)  MPIE  (res)  MIE   (res)
+  [31:13] [12:11] [10:8] [7]  [6:4] [3]  [2:0]
+  (other)  MPP    (res)  MPIE (res)  MIE  (res)
 ```
 
 | Field | Bits | Description |
@@ -720,8 +759,8 @@ non_leaf:
 ### 13.5 mie / mip Bit Layout
 
 ```
-  [31:12]     [11]      [10:8] [7]      [6:4] [3]      [2:0]
-  (platform)  MEIE/MEIP (res)  MTIE/MTIP (res) MSIE/MSIP (res)
+  [31:12]    [11]       [10:8] [7]       [6:4] [3]       [2:0]
+  (platform) MEIE/MEIP  (res)  MTIE/MTIP (res) MSIE/MSIP (res)
 ```
 
 | Bit | mie name | mip name | Source |
